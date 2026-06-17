@@ -1,20 +1,19 @@
 # Atualizador de placares da Copa 2026
 
-Este repositório atualiza automaticamente os placares dos eventos da agenda Google **Copa do Mundo 2026** usando GitHub Actions, API-Football e a API aberta `worldcup26.ir` como fonte alternativa.
+Este repositório atualiza automaticamente os placares dos eventos da agenda Google **Copa do Mundo 2026** usando GitHub Actions e a API aberta `worldcup26.ir` como fonte principal.
 
 ## Como funciona
 
 - O GitHub Actions acorda a cada 5 minutos.
 - O script sai imediatamente se não houver jogo em janela ativa.
-- Durante uma janela de jogo, ele consulta a API-Football.
-- Se a API-Football falhar, ele tenta a API aberta `worldcup26.ir`.
+- Durante uma janela de jogo, ele consulta a API aberta `worldcup26.ir`.
+- Ele só atualiza quando as seleções da API batem com as seleções do evento da agenda.
 - Se encontrar placar ao vivo ou final, atualiza o evento correspondente no Google Calendar.
 
 ## Segredos necessários no GitHub
 
 Em `Settings > Secrets and variables > Actions > Secrets`, crie:
 
-- `API_FOOTBALL_KEY`: sua chave da API-Football.
 - `GOOGLE_CALENDAR_ID`: ID da agenda Copa do Mundo 2026.
 - `GOOGLE_SERVICE_ACCOUNT_JSON`: JSON completo da service account do Google.
 
@@ -49,7 +48,7 @@ O teste manual força a execução mesmo fora da janela de jogo.
 ## Arquivos importantes
 
 - `.github/workflows/update-world-cup-scores.yml`: agenda o robô.
-- `scripts/update-world-cup-scores.mjs`: consulta API-Football, tenta `worldcup26.ir` como alternativa e atualiza o Google Calendar.
+- `scripts/update-world-cup-scores.mjs`: consulta `worldcup26.ir` e atualiza o Google Calendar.
 - `copa-do-mundo-2026-todos-os-jogos.csv`: calendário-base usado para decidir janelas de execução.
 
 ## Observações
@@ -57,3 +56,4 @@ O teste manual força a execução mesmo fora da janela de jogo.
 - O GitHub Actions não roda cron a cada 1 minuto de forma confiável; o mínimo prático é 5 minutos.
 - Em repositório público, Actions em runner padrão é grátis.
 - Em repositório privado, a conta grátis tem cota mensal de minutos.
+- A API-Football não é usada por padrão. Ela só entra se `USE_API_FOOTBALL_FALLBACK=1` for configurado explicitamente.
