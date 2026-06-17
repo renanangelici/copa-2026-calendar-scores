@@ -1,12 +1,13 @@
 # Atualizador de placares da Copa 2026
 
-Este repositório atualiza automaticamente os placares dos eventos da agenda Google **Copa do Mundo 2026** usando GitHub Actions + API-Football.
+Este repositório atualiza automaticamente os placares dos eventos da agenda Google **Copa do Mundo 2026** usando GitHub Actions, API-Football e a API aberta `worldcup26.ir` como fonte alternativa.
 
 ## Como funciona
 
 - O GitHub Actions acorda a cada 5 minutos.
 - O script sai imediatamente se não houver jogo em janela ativa.
 - Durante uma janela de jogo, ele consulta a API-Football.
+- Se a API-Football falhar, ele tenta a API aberta `worldcup26.ir`.
 - Se encontrar placar ao vivo ou final, atualiza o evento correspondente no Google Calendar.
 
 ## Segredos necessários no GitHub
@@ -48,7 +49,7 @@ O teste manual força a execução mesmo fora da janela de jogo.
 ## Arquivos importantes
 
 - `.github/workflows/update-world-cup-scores.yml`: agenda o robô.
-- `scripts/update-world-cup-scores.mjs`: consulta API-Football e atualiza o Google Calendar.
+- `scripts/update-world-cup-scores.mjs`: consulta API-Football, tenta `worldcup26.ir` como alternativa e atualiza o Google Calendar.
 - `copa-do-mundo-2026-todos-os-jogos.csv`: calendário-base usado para decidir janelas de execução.
 
 ## Observações
