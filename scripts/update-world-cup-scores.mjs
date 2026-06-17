@@ -7,6 +7,7 @@ const CONFIG = {
     "5876f101afb64371650d9ac4ab8c39c59dfacae79cbe4f29be21a4312daa860f@group.calendar.google.com",
   apiFootballKey: process.env.API_FOOTBALL_KEY,
   apiBase: "https://v3.football.api-sports.io",
+  worldCupApiBase: process.env.WORLDCUP26_API_BASE || "https://worldcup26.ir",
   apiLeagueId: process.env.API_FOOTBALL_LEAGUE_ID || "1",
   apiSeason: process.env.API_FOOTBALL_SEASON || "2026",
   timezone: "America/Sao_Paulo",
@@ -67,7 +68,7 @@ const TEAM_ALIASES = {
 };
 
 const FINAL_STATUSES = new Set(["FT", "AET", "PEN"]);
-const LIVE_STATUSES = new Set(["1H", "HT", "2H", "ET", "BT", "P"]);
+const LIVE_STATUSES = new Set(["1H", "HT", "2H", "ET", "BT", "P", "LIVE"]);
 
 main().catch(error => {
   console.error(error.stack || error.message || error);
@@ -93,7 +94,7 @@ async function main() {
 
   const fixtures = await getRelevantFixtures(now);
   if (!fixtures.length) {
-    console.log("API-Football não retornou partidas relevantes agora.");
+    console.log("Nenhuma fonte retornou partidas relevantes agora.");
     return;
   }
 
@@ -145,18 +146,33 @@ function isInAnyMatchWindow(schedule, now) {
 }
 
 async function getRelevantFixtures(now) {
-  const live = await apiFootball("/fixtures?live=all");
-  const liveFixtures = live.response || [];
-
-  const today = formatDateInTimeZone(now, CONFIG.timezone);
-  const byDate = await apiFootball(
-    `/fixtures?date=${today}&league=${CONFIG.apiLeagueId}&season=${CONFIG.apiSeason}`
-  );
-
   const map = new Map();
-  for (const fixture of [...liveFixtures, ...(byDate.response || [])]) {
-    map.set(String(fixture.fixture.id), fixture);
+
+  try {
+    const live = await apiFootball("/fixtures?live=all");
+    const liveFixtures = live.response || [];
+
+    const today = formatDateInTimeZone(now, CONFIG.timezone);
+    const byDate = await apiFootball(
+      `/fixtures?date=${today}&league=${CONFIG.apiLeagueId}&season=${CONFIG.apiSeason}`
+    );
+
+    for (const fixture of [...liveFixtures, ...(byDate.response || [])]) {
+      map.set(`api-football:${fixture.fixture.id}`, fixture);
+    }
+  } catch (error) {
+    console.warn(`API-Football indisponivel nesta execucao: ${error.message}`);
   }
+
+  try {
+    const worldCupFixtures = await worldCup26Fixtures();
+    for (const fixture of worldCupFixtures) {
+      map.set(`worldcup26:${fixture.matchNumber}`, fixture);
+    }
+  } catch (error) {
+    console.warn(`worldcup26.ir indisponivel nesta execucao: ${error.message}`);
+  }
+
   return [...map.values()];
 }
 
@@ -169,6 +185,66 @@ async function apiFootball(path) {
     throw new Error(`API-Football HTTP ${response.status}: ${text.slice(0, 400)}`);
   }
   return JSON.parse(text);
+}
+
+async function worldCup26Fixtures() {
+  const response = await fetch(`${CONFIG.worldCupApiBase}/get/games`);
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`worldcup26.ir HTTP ${response.status}: ${text.slice(0, 400)}`);
+  }
+
+  const data = JSON.parse(text);
+  const games = data.games || [];
+  return games.map(worldCup26GameToFixture).filter(Boolean);
+}
+
+function worldCup26GameToFixture(game) {
+  const homeGoals = parseScore(game.home_score);
+  const awayGoals = parseScore(game.away_score);
+  const timeElapsed = String(game.time_elapsed || "").trim();
+  const finished = /^true$/i.test(String(game.finished || ""));
+  const notStarted = !finished && /^(notstarted|not started|ns|upcoming|scheduled)?$/i.test(timeElapsed);
+
+  let shortStatus = "NS";
+  let elapsed = null;
+  if (finished) {
+    shortStatus = "FT";
+  } else if (/^(ht|half[- ]?time|interval)$/i.test(timeElapsed)) {
+    shortStatus = "HT";
+  } else if (!notStarted) {
+    shortStatus = "LIVE";
+    const minute = timeElapsed.match(/\d+/);
+    elapsed = minute ? Number(minute[0]) : null;
+  }
+
+  return {
+    source: "worldcup26.ir",
+    matchNumber: Number(game.id),
+    fixture: {
+      id: `worldcup26-${game.id}`,
+      date: game.date || parseWorldCup26LocalDate(game.local_date),
+      status: { short: shortStatus, elapsed }
+    },
+    teams: {
+      home: { name: game.home_team_name_en || game.home_team_label || "" },
+      away: { name: game.away_team_name_en || game.away_team_label || "" }
+    },
+    goals: { home: homeGoals, away: awayGoals }
+  };
+}
+
+function parseScore(value) {
+  if (value == null || value === "" || /^null$/i.test(String(value))) return null;
+  const score = Number(value);
+  return Number.isFinite(score) ? score : null;
+}
+
+function parseWorldCup26LocalDate(value) {
+  const match = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  const [, month, day, year, hour, minute] = match;
+  return `${year}-${month}-${day}T${hour}:${minute}:00`;
 }
 
 async function getCandidateCalendarEvents(token, now) {
@@ -195,9 +271,14 @@ async function getCandidateCalendarEvents(token, now) {
 function findMatchingFixture(event, fixtures) {
   const eventTitle = normalize(event.summary || "");
   const eventStart = new Date(event.start?.dateTime || event.start?.date).getTime();
+  const eventMatchNumber = matchNumberFromDescription(event.description || "");
 
   const scored = fixtures
     .map(fixture => {
+      if (eventMatchNumber && fixture.matchNumber === eventMatchNumber) {
+        return { fixture, score: 100, teamScore: 8, diffMinutes: 0 };
+      }
+
       const fixtureStart = new Date(fixture.fixture.date).getTime();
       const diffMinutes = Math.abs(fixtureStart - eventStart) / 60000;
       if (diffMinutes > 150) return null;
@@ -339,6 +420,11 @@ function getStatusLabel(shortStatus, elapsed) {
   if (shortStatus === "ET") return elapsed ? `Prorrogacao ${elapsed}'` : "Prorrogacao";
   if (shortStatus === "P") return "Penaltis";
   return elapsed ? `AO VIVO ${elapsed}'` : "AO VIVO";
+}
+
+function matchNumberFromDescription(description) {
+  const match = stripHtml(description).match(/Jogo\s+(\d+)\s+da Copa do Mundo/i);
+  return match ? Number(match[1]) : null;
 }
 
 function upsertFinalScoreLine(description, finalLine) {
