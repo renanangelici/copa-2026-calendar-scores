@@ -1,0 +1,27 @@
+name: Atualizar placares da Copa 2026
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Atualizar placares
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+          API_FOOTBALL_LEAGUE_ID: ${{ vars.API_FOOTBALL_LEAGUE_ID || '1' }}
+          API_FOOTBALL_SEASON: ${{ vars.API_FOOTBALL_SEASON || '2026' }}
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+        run: node scripts/update-world-cup-scores.mjs
