@@ -222,19 +222,17 @@ function worldCup26GameToFixture(game) {
   const homeGoals = parseScore(game.home_score);
   const awayGoals = parseScore(game.away_score);
   const timeElapsed = String(game.time_elapsed || "").trim();
+  const elapsed = parseElapsedLabel(timeElapsed);
   const finished = /^true$/i.test(String(game.finished || ""));
   const notStarted = !finished && /^(notstarted|not started|ns|upcoming|scheduled)?$/i.test(timeElapsed);
 
   let shortStatus = "NS";
-  let elapsed = null;
   if (finished) {
     shortStatus = "FT";
   } else if (/^(ht|half[- ]?time|interval)$/i.test(timeElapsed)) {
     shortStatus = "HT";
   } else if (!notStarted) {
     shortStatus = "LIVE";
-    const minute = timeElapsed.match(/\d+/);
-    elapsed = minute ? Number(minute[0]) : null;
   }
 
   return {
@@ -243,7 +241,7 @@ function worldCup26GameToFixture(game) {
     fixture: {
       id: `worldcup26-${game.id}`,
       date: game.date || parseWorldCup26LocalDate(game.local_date),
-      status: { short: shortStatus, elapsed }
+      status: { short: shortStatus, elapsed: elapsed.minute, rawElapsed: elapsed.label }
     },
     teams: {
       home: { name: game.home_team_name_en || game.home_team_label || "" },
@@ -257,6 +255,15 @@ function parseScore(value) {
   if (value == null || value === "" || /^null$/i.test(String(value))) return null;
   const score = Number(value);
   return Number.isFinite(score) ? score : null;
+}
+
+function parseElapsedLabel(value) {
+  const match = String(value || "").match(/(\d{1,3})(?:\s*\+\s*(\d{1,2}))?/);
+  if (!match) return { minute: null, label: null };
+
+  const minute = Number(match[1]);
+  const label = match[2] ? `${match[1]}+${match[2]}'` : `${match[1]}'`;
+  return { minute: Number.isFinite(minute) ? minute : null, label };
 }
 
 function parseWorldCup26LocalDate(value) {
@@ -335,7 +342,7 @@ function buildEventPatch(event, fixture) {
   if (homeGoals == null || awayGoals == null) return null;
 
   const titleParts = getTitleParts(event.summary || "");
-  const statusLabel = getStatusLabel(shortStatus, status.elapsed);
+  const statusLabel = getStatusLabel(shortStatus, status.elapsed, status.rawElapsed);
   const stage = titleParts.stage || stageFromDescription(event.description || "");
   const prefix = isFinal ? stage : `${stage} - ${statusLabel}`;
   const nextSummary = `(${prefix}) ${titleParts.left} ${homeGoals} x ${awayGoals} ${titleParts.right}`.trim();
@@ -436,10 +443,11 @@ function stageFromDescription(description) {
   return match ? match[1].trim() : "";
 }
 
-function getStatusLabel(shortStatus, elapsed) {
+function getStatusLabel(shortStatus, elapsed, rawElapsed = null) {
   if (shortStatus === "HT") return "Intervalo";
   if (shortStatus === "ET") return elapsed ? `Prorrogacao ${elapsed}'` : "Prorrogacao";
   if (shortStatus === "P") return "Penaltis";
+  if (rawElapsed) return `AO VIVO ${rawElapsed}`;
   return elapsed ? `AO VIVO ${elapsed}'` : "AO VIVO";
 }
 
