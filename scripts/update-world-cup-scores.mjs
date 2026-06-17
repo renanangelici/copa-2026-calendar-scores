@@ -8,6 +8,7 @@ const CONFIG = {
   apiFootballKey: process.env.API_FOOTBALL_KEY,
   apiBase: "https://v3.football.api-sports.io",
   worldCupApiBase: process.env.WORLDCUP26_API_BASE || "https://worldcup26.ir",
+  useApiFootballFallback: process.env.USE_API_FOOTBALL_FALLBACK === "1",
   apiLeagueId: process.env.API_FOOTBALL_LEAGUE_ID || "1",
   apiSeason: process.env.API_FOOTBALL_SEASON || "2026",
   timezone: "America/Sao_Paulo",
@@ -117,7 +118,7 @@ async function main() {
 }
 
 function validateEnv() {
-  if (!CONFIG.apiFootballKey) {
+  if (CONFIG.useApiFootballFallback && !CONFIG.apiFootballKey) {
     throw new Error("Falta secret API_FOOTBALL_KEY.");
   }
   if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
@@ -149,6 +150,19 @@ async function getRelevantFixtures(now) {
   const map = new Map();
 
   try {
+    const worldCupFixtures = await worldCup26Fixtures();
+    for (const fixture of worldCupFixtures) {
+      map.set(`worldcup26:${fixture.matchNumber}`, fixture);
+    }
+  } catch (error) {
+    console.warn(`worldcup26.ir indisponivel nesta execucao: ${error.message}`);
+  }
+
+  if (!CONFIG.useApiFootballFallback) {
+    return [...map.values()];
+  }
+
+  try {
     const live = await apiFootball("/fixtures?live=all");
     const liveFixtures = live.response || [];
 
@@ -162,15 +176,6 @@ async function getRelevantFixtures(now) {
     }
   } catch (error) {
     console.warn(`API-Football indisponivel nesta execucao: ${error.message}`);
-  }
-
-  try {
-    const worldCupFixtures = await worldCup26Fixtures();
-    for (const fixture of worldCupFixtures) {
-      map.set(`worldcup26:${fixture.matchNumber}`, fixture);
-    }
-  } catch (error) {
-    console.warn(`worldcup26.ir indisponivel nesta execucao: ${error.message}`);
   }
 
   return [...map.values()];
@@ -188,15 +193,29 @@ async function apiFootball(path) {
 }
 
 async function worldCup26Fixtures() {
-  const response = await fetch(`${CONFIG.worldCupApiBase}/get/games`);
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`worldcup26.ir HTTP ${response.status}: ${text.slice(0, 400)}`);
-  }
-
-  const data = JSON.parse(text);
+  const data = await fetchJsonWithRetry(`${CONFIG.worldCupApiBase}/get/games`, {}, 3);
   const games = data.games || [];
   return games.map(worldCup26GameToFixture).filter(Boolean);
+}
+
+async function fetchJsonWithRetry(url, options = {}, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, options);
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${text.slice(0, 400)}`);
+      }
+      return JSON.parse(text);
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+      }
+    }
+  }
+  throw lastError;
 }
 
 function worldCup26GameToFixture(game) {
@@ -275,22 +294,24 @@ function findMatchingFixture(event, fixtures) {
 
   const scored = fixtures
     .map(fixture => {
-      if (eventMatchNumber && fixture.matchNumber === eventMatchNumber) {
-        return { fixture, score: 100, teamScore: 8, diffMinutes: 0 };
-      }
-
       const fixtureStart = new Date(fixture.fixture.date).getTime();
       const diffMinutes = Math.abs(fixtureStart - eventStart) / 60000;
-      if (diffMinutes > 150) return null;
 
       const home = fixture.teams.home.name;
       const away = fixture.teams.away.name;
       const homeMatches = aliasesFor(home).some(alias => eventTitle.includes(normalize(alias)));
       const awayMatches = aliasesFor(away).some(alias => eventTitle.includes(normalize(alias)));
       const teamScore = (homeMatches ? 4 : 0) + (awayMatches ? 4 : 0);
-      const timeScore = Math.max(0, 3 - diffMinutes / 20);
+      const numberScore = eventMatchNumber && fixture.matchNumber === eventMatchNumber ? 2 : 0;
+      if (teamScore < 8) return null;
 
-      return { fixture, score: teamScore + timeScore, teamScore, diffMinutes };
+      if (!eventMatchNumber || fixture.matchNumber !== eventMatchNumber) {
+        if (!Number.isFinite(diffMinutes) || diffMinutes > 150) return null;
+      }
+
+      const timeScore = Number.isFinite(diffMinutes) ? Math.max(0, 3 - diffMinutes / 20) : 0;
+
+      return { fixture, score: teamScore + numberScore + timeScore, teamScore, diffMinutes };
     })
     .filter(Boolean)
     .sort((a, b) => b.score - a.score);
