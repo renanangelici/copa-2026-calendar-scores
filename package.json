@@ -1,0 +1,13 @@
+{
+  "name": "copa-2026-calendar-scores",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "update-scores": "node scripts/update-world-cup-scores.mjs",
+    "check": "node --check scripts/update-world-cup-scores.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
