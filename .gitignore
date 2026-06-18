@@ -3,3 +3,7 @@ apps-script-copa-placares-pronto.gs
 node_modules/
 .DS_Store
 *.log
+client_secret*.json
+credentials*.json
+oauth*.json
+token*.json
