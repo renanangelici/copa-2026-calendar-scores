@@ -1,5 +1,9 @@
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const CONFIG = {
   calendarId:
@@ -7,6 +11,9 @@ const CONFIG = {
     "5876f101afb64371650d9ac4ab8c39c59dfacae79cbe4f29be21a4312daa860f@group.calendar.google.com",
   apiFootballKey: process.env.API_FOOTBALL_KEY,
   apiBase: "https://v3.football.api-sports.io",
+  espnScoreboardUrl:
+    process.env.ESPN_SCOREBOARD_URL ||
+    "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard",
   worldCupApiBase: process.env.WORLDCUP26_API_BASE || "https://worldcup26.ir",
   useApiFootballFallback: process.env.USE_API_FOOTBALL_FALLBACK === "1",
   apiLeagueId: process.env.API_FOOTBALL_LEAGUE_ID || "1",
@@ -121,8 +128,13 @@ function validateEnv() {
   if (CONFIG.useApiFootballFallback && !CONFIG.apiFootballKey) {
     throw new Error("Falta secret API_FOOTBALL_KEY.");
   }
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    throw new Error("Falta secret GOOGLE_SERVICE_ACCOUNT_JSON.");
+  if (
+    !process.env.GOOGLE_SERVICE_ACCOUNT_JSON &&
+    (!process.env.GOOGLE_OAUTH_CLIENT_JSON || !process.env.GOOGLE_OAUTH_REFRESH_TOKEN)
+  ) {
+    throw new Error(
+      "Faltam secrets do Google. Use GOOGLE_SERVICE_ACCOUNT_JSON ou GOOGLE_OAUTH_CLIENT_JSON + GOOGLE_OAUTH_REFRESH_TOKEN."
+    );
   }
 }
 
@@ -150,7 +162,18 @@ async function getRelevantFixtures(now) {
   const map = new Map();
 
   try {
+    const espn = await espnFixtures(now);
+    console.log(`ESPN retornou ${espn.length} partida(s).`);
+    for (const fixture of espn) {
+      map.set(`espn:${fixture.fixture.id}`, fixture);
+    }
+  } catch (error) {
+    console.warn(`ESPN indisponivel nesta execucao: ${error.message}`);
+  }
+
+  try {
     const worldCupFixtures = await worldCup26Fixtures();
+    console.log(`worldcup26.ir retornou ${worldCupFixtures.length} partida(s).`);
     for (const fixture of worldCupFixtures) {
       map.set(`worldcup26:${fixture.matchNumber}`, fixture);
     }
@@ -166,12 +189,18 @@ async function getRelevantFixtures(now) {
     const live = await apiFootball("/fixtures?live=all");
     const liveFixtures = live.response || [];
 
-    const today = formatDateInTimeZone(now, CONFIG.timezone);
-    const byDate = await apiFootball(
-      `/fixtures?date=${today}&league=${CONFIG.apiLeagueId}&season=${CONFIG.apiSeason}`
-    );
+    let dateFixtures = [];
+    if (!liveFixtures.length) {
+      const today = formatDateInTimeZone(now, CONFIG.timezone);
+      const byDate = await apiFootball(
+        `/fixtures?date=${today}&league=${CONFIG.apiLeagueId}&season=${CONFIG.apiSeason}`
+      );
+      dateFixtures = byDate.response || [];
+    }
 
-    for (const fixture of [...liveFixtures, ...(byDate.response || [])]) {
+    console.log(`API-Football retornou ${liveFixtures.length} live e ${dateFixtures.length} por data.`);
+
+    for (const fixture of [...liveFixtures, ...dateFixtures]) {
       map.set(`api-football:${fixture.fixture.id}`, fixture);
     }
   } catch (error) {
@@ -179,6 +208,55 @@ async function getRelevantFixtures(now) {
   }
 
   return [...map.values()];
+}
+
+async function espnFixtures(now) {
+  const date = formatDateInTimeZone(now, CONFIG.timezone).replace(/-/g, "");
+  const data = await fetchJsonWithRetry(`${CONFIG.espnScoreboardUrl}?dates=${date}`, {}, 3);
+  const events = data.events || [];
+  return events.map(espnEventToFixture).filter(Boolean);
+}
+
+function espnEventToFixture(event) {
+  const competition = event.competitions?.[0];
+  if (!competition) return null;
+
+  const competitors = competition.competitors || [];
+  const home = competitors.find(team => team.homeAway === "home");
+  const away = competitors.find(team => team.homeAway === "away");
+  if (!home || !away) return null;
+
+  const status = competition.status || event.status || {};
+  const statusType = status.type || {};
+  const statusName = String(statusType.name || "").toUpperCase();
+  const statusState = String(statusType.state || "").toLowerCase();
+  const completed = Boolean(statusType.completed);
+
+  let shortStatus = "NS";
+  if (completed || statusState === "post") {
+    shortStatus = "FT";
+  } else if (statusName.includes("HALFTIME") || statusName.includes("STATUS_HALFTIME")) {
+    shortStatus = "HT";
+  } else if (statusState === "in") {
+    shortStatus = "LIVE";
+  }
+
+  const elapsed = parseElapsedLabel(status.displayClock || statusType.detail || statusType.shortDetail);
+
+  return {
+    source: "ESPN",
+    matchNumber: Number(event.id),
+    fixture: {
+      id: `espn-${event.id}`,
+      date: event.date || competition.date,
+      status: { short: shortStatus, elapsed: elapsed.minute, rawElapsed: elapsed.label }
+    },
+    teams: {
+      home: { name: home.team?.displayName || home.team?.name || "" },
+      away: { name: away.team?.displayName || away.team?.name || "" }
+    },
+    goals: { home: parseScore(home.score), away: parseScore(away.score) }
+  };
 }
 
 async function apiFootball(path) {
@@ -202,12 +280,7 @@ async function fetchJsonWithRetry(url, options = {}, attempts = 3) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetch(url, options);
-      const text = await response.text();
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${text.slice(0, 400)}`);
-      }
-      return JSON.parse(text);
+      return await fetchJson(url, options);
     } catch (error) {
       lastError = error;
       if (attempt < attempts) {
@@ -216,6 +289,34 @@ async function fetchJsonWithRetry(url, options = {}, attempts = 3) {
     }
   }
   throw lastError;
+}
+
+async function fetchJson(url, options = {}) {
+  try {
+    const response = await fetch(url, options);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${text.slice(0, 400)}`);
+    }
+    return JSON.parse(text);
+  } catch (error) {
+    if (isDnsFailure(error) && (!options.method || options.method === "GET") && !options.headers) {
+      const { stdout } = await execFileAsync("curl", ["-L", "-sS", url], {
+        maxBuffer: 20 * 1024 * 1024
+      });
+      return JSON.parse(stdout);
+    }
+    throw error;
+  }
+}
+
+function isDnsFailure(error) {
+  return (
+    error?.cause?.code === "ENOTFOUND" ||
+    error?.cause?.code === "EAI_AGAIN" ||
+    error?.code === "ENOTFOUND" ||
+    error?.code === "EAI_AGAIN"
+  );
 }
 
 function worldCup26GameToFixture(game) {
@@ -388,6 +489,10 @@ async function googleFetch(token, url, options = {}) {
 }
 
 async function getGoogleAccessToken() {
+  if (process.env.GOOGLE_OAUTH_CLIENT_JSON && process.env.GOOGLE_OAUTH_REFRESH_TOKEN) {
+    return getGoogleAccessTokenWithRefreshToken();
+  }
+
   const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
@@ -420,6 +525,35 @@ async function getGoogleAccessToken() {
     throw new Error(`Google OAuth HTTP ${response.status}: ${JSON.stringify(data).slice(0, 800)}`);
   }
   return data.access_token;
+}
+
+async function getGoogleAccessTokenWithRefreshToken() {
+  const client = parseOAuthClient(process.env.GOOGLE_OAUTH_CLIENT_JSON);
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: client.client_id,
+      client_secret: client.client_secret,
+      refresh_token: process.env.GOOGLE_OAUTH_REFRESH_TOKEN,
+      grant_type: "refresh_token"
+    })
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(`Google OAuth refresh HTTP ${response.status}: ${JSON.stringify(data).slice(0, 800)}`);
+  }
+  return data.access_token;
+}
+
+function parseOAuthClient(rawJson) {
+  const parsed = JSON.parse(rawJson);
+  const client = parsed.installed || parsed.web || parsed;
+  if (!client.client_id || !client.client_secret) {
+    throw new Error("GOOGLE_OAUTH_CLIENT_JSON nao contem client_id/client_secret.");
+  }
+  return client;
 }
 
 function getTitleParts(title) {
